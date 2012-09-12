@@ -1,9 +1,8 @@
-﻿using System;
+using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using System.Text;
-using System.Threading;
 
 namespace JsonPatch
 {
@@ -12,7 +11,7 @@ namespace JsonPatch
 		private readonly IJsonSerializer _serializer;
 
 		public JsonDiffPatch()
-			: this(new DefaultJsonSerializer())
+			: this(new DefaultDeserializer())
 		{ }
 
 		public JsonDiffPatch(IJsonSerializer serializer)
@@ -20,52 +19,62 @@ namespace JsonPatch
 			Debug.Assert(serializer != null, "serializer != null");
 			if (serializer == null)
 				throw new ArgumentNullException("serializer");
-			_serializer = serializer;
+			this._serializer = serializer;
 		}
 
-		public IEnumerable<JsonPatchBase> GetPatch(string json1, string json2)
+		public List<JsonPatchBase> GetPatch(string json1, string json2)
 		{
-			var graph1 = _serializer.Deserialize(json1);
-			var graph2 = _serializer.Deserialize(json2);
+			var patches = GetPatchInternal(json1, json2).ToList();
+			if (patches.Count > 0)
+			{
+				return patches;
+			}
+			return null;
+		}
+
+		private IEnumerable<JsonPatchBase> GetPatchInternal(string json1, string json2)
+		{
+			var graph1 = this._serializer.Deserialize(json1);
+			var graph2 = this._serializer.Deserialize(json2);
 
 			if (graph1 != null && graph2 != null)
 			{
-				var queue = new Queue<Tuple<JsonMemberInfo, JsonMemberInfo>>();
-				queue.Enqueue(new Tuple<JsonMemberInfo, JsonMemberInfo>(graph1, graph2));
+				var queue = new Queue<KeyValuePair<JsonMemberInfo, JsonMemberInfo>>();
+				queue.Enqueue(new KeyValuePair<JsonMemberInfo, JsonMemberInfo>(graph1, graph2));
 				while (queue.Count > 0)
 				{
 					var dequeue = queue.Dequeue();
-					var item1 = dequeue.Item1;
-					var item2 = dequeue.Item2;
+					var item1 = dequeue.Key;
+					var item2 = dequeue.Value;
 					if (item1.Path.Property == item2.Path.Property)
 					{
 						if (item1.Children == null)
 						{
 							if (item2.Children == null)
 							{
-								if (item1.Value != item2.Value)
+								if (Comparer.Default.Compare(item1.Value, item2.Value) != 0)
 								{
-									yield return new JsonPatchRemove { Path = item1.Path };
-									if (item2.IsArray)
+									yield return new JsonPatchBase(JsonDiffPatchOperation.Remove) { Path = item1.Path };
+									if (item2.Parent.IsArray)
 									{
-										yield return new JsonPatchAddToArray { Path = item2.Path.Prev, Element = Convert.ToInt32(item2.Path.Property), Value = item2.Value };
+										yield return new JsonPatchBase { Path = item2.Path.Prev, Element = Convert.ToInt32((string)item2.Path.Property), Value = item2.Value };
 									}
 									else
 									{
-										yield return new JsonPatchAddToObject { Path = item2.Path.Prev, Element = item2.Path.Property, Value = item2.Value };
+										yield return new JsonPatchBase { Path = item2.Path.Prev, Element = item2.Path.Property, Value = item2.Value };
 									}
 								}
 							}
 							else
 							{
-								yield return new JsonPatchRemove { Path = item1.Path };
+								yield return new JsonPatchBase(JsonDiffPatchOperation.Remove) { Path = item1.Path };
 								if (item2.IsArray)
 								{
-									yield return new JsonPatchAddToArray { Path = item2.Path.Prev, Element = Convert.ToInt32(item2.Path.Property), Value = item2.Value };
+									yield return new JsonPatchBase { Path = item2.Path.Prev, Element = Convert.ToInt32((string)item2.Path.Property), Value = item2.Value };
 								}
 								else
 								{
-									yield return new JsonPatchAddToObject { Path = item2.Path.Prev, Element = item2.Path.Property, Value = item2.Value };
+									yield return new JsonPatchBase { Path = item2.Path.Prev, Element = item2.Path.Property, Value = item2.Value };
 								}
 							}
 						}
@@ -76,55 +85,171 @@ namespace JsonPatch
 								var intersect = item1.Children.Intersect(item2.Children, new JsonMembersComparer());
 								foreach (var pair in intersect)
 								{
-									queue.Enqueue(new Tuple<JsonMemberInfo, JsonMemberInfo>(item1.Children[pair.Key], item2.Children[pair.Key]));
+									queue.Enqueue(new KeyValuePair<JsonMemberInfo, JsonMemberInfo>(item1.Children[pair.Key], item2.Children[pair.Key]));
 								}
 								var except = item2.Children.Except(item1.Children, new JsonMembersComparer());
 								foreach (var pair in except)
 								{
 									var info = pair.Value;
-									if (info.IsArray)
+									if (info.Parent.IsArray)
 									{
-										yield return new JsonPatchAddToArray { Path = info.Path.Prev, Element = Convert.ToInt32(info.Path.Property), Value = info.Value };
+										yield return new JsonPatchBase { Path = info.Path.Prev, Element = Convert.ToInt32((string)info.Path.Property), Value = info.Value };
 									}
 									else
 									{
-										yield return new JsonPatchAddToObject { Path = info.Path.Prev, Element = info.Path.Property, Value = info.Value };
+										yield return new JsonPatchBase { Path = info.Path.Prev, Element = info.Path.Property, Value = info.Value };
 									}
+								}
+								var subtract = item1.Children.Except(item2.Children, new JsonMembersComparer());
+								foreach (var pair in subtract)
+								{
+									yield return new JsonPatchBase(JsonDiffPatchOperation.Remove) { Path = pair.Value.Path };
 								}
 							}
 							else
 							{
-								yield return new JsonPatchRemove { Path = item1.Path };
+								yield return new JsonPatchBase(JsonDiffPatchOperation.Remove) { Path = item1.Path };
 								if (item2.IsArray)
 								{
-									yield return new JsonPatchAddToArray { Path = item2.Path.Prev, Element = Convert.ToInt32(item2.Path.Property), Value = item2.Value };
+									yield return new JsonPatchBase { Path = item2.Path.Prev, Element = Convert.ToInt32((string)item2.Path.Property), Value = item2.Value };
 								}
 								else
 								{
-									yield return new JsonPatchAddToObject { Path = item2.Path.Prev, Element = item2.Path.Property, Value = item2.Value };
+									yield return new JsonPatchBase { Path = item2.Path.Prev, Element = item2.Path.Property, Value = item2.Value };
 								}
 							}
 						}
 					}
 					else
 					{
-						yield return new JsonPatchRemove { Path = item1.Path };
+						yield return new JsonPatchBase(JsonDiffPatchOperation.Remove) { Path = item1.Path };
 						if (item2.IsArray)
 						{
-							yield return new JsonPatchAddToArray { Path = item2.Path.Prev, Element = Convert.ToInt32(item2.Path.Property), Value = item2.Value };
+							yield return new JsonPatchBase { Path = item2.Path.Prev, Element = Convert.ToInt32((string)item2.Path.Property), Value = item2.Value };
 						}
 						else
 						{
-							yield return new JsonPatchAddToObject { Path = item2.Path.Prev, Element = item2.Path.Property, Value = item2.Value };
+							yield return new JsonPatchBase { Path = item2.Path.Prev, Element = item2.Path.Property, Value = item2.Value };
 						}
 					}
 				}
 			}
 		}
 
-		public string ApplyPatch(IEnumerable<JsonPatchBase> patch, string json)
+		public string ApplyPatch(IEnumerable<JsonPatchBase> patches, string json)
 		{
-			throw new NotImplementedException();
+			var graph = _serializer.Deserialize(json);
+
+			if (patches == null)
+			{
+				return json;
+			}
+
+			foreach (var patch in patches)
+			{
+				if (patch.Operation == JsonDiffPatchOperation.Remove)
+				{
+					var root = patch.Path.GetRoot();
+					var memberInfo = graph.FindByPath(root, patch.Path);
+					if (memberInfo != null)
+					{
+						if (memberInfo.Parent != null)
+						{
+							memberInfo.Parent.Children.Remove(memberInfo.Parent.Children.Single(x => x.Value == memberInfo).Key);
+						}
+						else
+						{
+							if (memberInfo == graph)
+							{
+								graph = new JsonMemberInfo { Path = new JsonPath { Property = "$" } };
+							}
+							else
+							{
+								throw new Exception("Invalid JSON Graph Structure!");
+							}
+						}
+					}
+					else
+					{
+						throw new Exception("Invalid JSON Structure!");
+					}
+				}
+				if (patch.Operation == JsonDiffPatchOperation.Add)
+				{
+					if (patch.Element is int)
+					{
+						var root = patch.Path.GetRoot();
+						var memberInfo = graph.FindByPath(root, patch.Path);
+						if (memberInfo != null)
+						{
+							if (memberInfo.IsArray)
+							{
+								var key = Convert.ToString(patch.Element);
+								if (!memberInfo.Children.ContainsKey(key))
+								{
+									var info = new JsonMemberInfo
+									           	{
+									           		Parent = memberInfo,
+									           		Path = new JsonPath { IsIndexer = true, Property = key },
+									           		Value = patch.Value
+									           	};
+									info.Path.Prev = memberInfo.Path.Clone(info.Path);
+									memberInfo.Children.Add(key, info);
+								}
+								else
+								{
+									throw new Exception("Invalid JSON Structure! Index already exists.");
+								}
+							}
+							else
+							{
+								throw new Exception("Invalid JSON Structure! Not an Array.");
+							}
+						}
+						else
+						{
+							throw new Exception("Invalid JSON Structure!");
+						}
+					}
+					if (patch.Element is string)
+					{
+						var root = patch.Path.GetRoot();
+						var memberInfo = graph.FindByPath(root, patch.Path);
+						if (memberInfo != null)
+						{
+							if (memberInfo.IsObject)
+							{
+								var key = Convert.ToString(patch.Element);
+								if (!memberInfo.Children.ContainsKey(key))
+								{
+									var info = new JsonMemberInfo
+									           	{
+									           		Parent = memberInfo,
+									           		Path = new JsonPath { IsIndexer = false, Property = key },
+									           		Value = patch.Value
+									           	};
+									info.Path.Prev = memberInfo.Path.Clone(info.Path);
+									memberInfo.Children.Add(key, info);
+								}
+								else
+								{
+									throw new Exception("Invalid JSON Structure! Property already exists.");
+								}
+							}
+							else
+							{
+								throw new Exception("Invalid JSON Structure! Not an Object.");
+							}
+						}
+						else
+						{
+							throw new Exception("Invalid JSON Structure!");
+						}
+					}
+				}
+			}
+
+			return graph.ToJson(this._serializer);
 		}
 	}
 }
